@@ -1,0 +1,137 @@
+# ============================================================
+# Python .gitignore
+# ============================================================
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.pytest_cache/
+hypothesis/
+test-results/
+junit.xml
+
+# Type checking / linting caches
+.mypy_cache/
+.pyright/
+.ruff_cache/
+
+# Pyre
+.pyre/
+
+# Environments
+.env
+.venv
+venv/
+ENV/
+env/
+virtualenv/
+pipenv/
+.poetry/
+# Poetry creates venv elsewhere by default, but keep common ones:
+.poetry_venv/
+
+# Jupyter / IPython
+.ipynb_checkpoints/
+.profile_default/
+ipython_config.py
+
+# PEP 582; used by e.g. PDM
+__pypackages__/
+
+# IDEs / editors
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Local settings / secrets
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+secrets.*
+.env.*
+!.env.example
+
+# SQLite / local DB
+*.sqlite3
+*.db
+
+# PyCharm / IntelliJ
+*.iws
+*.ipr
+
+# Sphinx documentation
+docs/_build/
+
+# MkDocs
+site/
+
+# Temporary / cache
+tmp/
+temp/
+.cache/
+
+# Poetry lock / pip-tools (uncomment if you do NOT want to commit them)
+# poetry.lock
+# Pipfile.lock
+# requirements*.txt
+
+# ============================================================
+# End
+# ============================================================
