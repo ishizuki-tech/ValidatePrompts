@@ -54,12 +54,13 @@ graph:
 
 slm:
   accelerator: "GPU"
-  max_tokens: 1024
-  top_k: 20
-  top_p: 0.9
-  temperature: 0.2
+  max_tokens: 2048
+  top_k: 10
+  top_p: 0.2
+  temperature: 0.5
   user_turn_prefix: "<start_of_turn>user"
   model_turn_prefix: "<start_of_turn>model"
+  turn_end: "<end_of_turn>"
   empty_json_instruction: "Respond with an empty JSON object: {}"
   preamble: "You are a well-known farmer survey expert. Read the Question and the Answer."
   key_contract: |
@@ -84,6 +85,16 @@ slm:
     - RAW JSON only, ONE LINE.
     - Use COMPACT JSON (no spaces around ':' and ',').
     - No extra text.
+
+whisper:
+  enabled: true
+  asset_model_path: "models/ggml-model-q4_0.bin"
+  language: "en" # "auto", "en", "ja", "sw"
+  translate: false
+  print_timestamp: false
+  target_sample_rate: 16000
+  record_sample_rates: [16000, 48000, 44100]
+  compute_checksum: true
 
 prompts:
   - nodeId: Q1
@@ -154,19 +165,11 @@ prompts:
 
 model_defaults:
   # Model download UI defaults
+
   default_model_url: "https://huggingface.co/google/gemma-3n-E4B-it-litert-lm/resolve/main/gemma-3n-E4B-it-int4.litertlm"
   default_file_name: "Gemma3n4B.litertlm"
+
   # Optional tuning knobs (keep same defaults as code)
   timeout_ms: 1800000          # 30 minutes
   ui_throttle_ms: 250
   ui_min_delta_bytes: 1048576  # 1 MiB
-
-whisper:
-  enabled: true
-  asset_model_path: "models/ggml-small-q5_1.bin"
-  language: "en" # "auto", "en", "ja", "sw"
-  translate: false
-  print_timestamp: false
-  target_sample_rate: 16000
-  record_sample_rates: [16000, 48000, 44100]
-  compute_checksum: true

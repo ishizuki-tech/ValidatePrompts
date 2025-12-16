@@ -11,10 +11,11 @@ License: MIT License
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, List
-
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import yaml  # pip install pyyaml
@@ -26,8 +27,13 @@ except ImportError as e:
     )
 
 
+# =============================================================================
+# Data Structures
+# =============================================================================
+
 @dataclass(frozen=True)
 class PromptParts:
+    """Small container for SLM prompt contract pieces loaded from config."""
     user_prefix: str
     model_prefix: str
     turn_end: str
@@ -39,220 +45,367 @@ class PromptParts:
     empty_json_instruction: str
 
 
-def _as_str(value: Any, field_name: str) -> str:
-    """Convert YAML scalar/multiline to string safely."""
+# =============================================================================
+# Helpers (errors, coercion, IO)
+# =============================================================================
+
+def _die(msg: str, code: int = 2) -> None:
+    """Exit with a human-friendly error message and an exit code."""
+    sys.stderr.write(f"[compose_prompt] ERROR: {msg}\n")
+    raise SystemExit(code)
+
+
+def _as_str(value: Any, field_name: str, default: Optional[str] = None) -> str:
+    """Coerce a config value to string, or use a default."""
     if value is None:
-        return ""
+        if default is None:
+            _die(f"Missing required field: {field_name}")
+        return default
     if isinstance(value, str):
         return value
-    raise ValueError(f"Expected string for '{field_name}', got {type(value).__name__}")
+    return str(value)
 
 
-def _as_int(value: Any, field_name: str) -> Optional[int]:
-    """Parse int-ish YAML value safely."""
+def _as_int(value: Any, field_name: str, default: Optional[int] = None) -> int:
+    """Coerce a config value to int, or use a default."""
     if value is None:
-        return None
+        if default is None:
+            _die(f"Missing required int field: {field_name}")
+        return default
     if isinstance(value, bool):
-        raise ValueError(f"Expected int for '{field_name}', got bool")
-    if isinstance(value, int):
-        return value
-    if isinstance(value, (float, str)):
-        try:
-            return int(value)
-        except Exception as e:
-            raise ValueError(f"Failed to parse int for '{field_name}': {value}") from e
-    raise ValueError(f"Expected int for '{field_name}', got {type(value).__name__}")
+        _die(f"Invalid int field (bool not allowed): {field_name}")
+    try:
+        return int(value)
+    except Exception:
+        _die(f"Invalid int value for {field_name}: {value}")
 
 
-def _as_float(value: Any, field_name: str) -> Optional[float]:
-    """Parse float-ish YAML value safely."""
+def _as_float(value: Any, field_name: str, default: Optional[float] = None) -> float:
+    """Coerce a config value to float, or use a default."""
     if value is None:
-        return None
+        if default is None:
+            _die(f"Missing required float field: {field_name}")
+        return default
     if isinstance(value, bool):
-        raise ValueError(f"Expected float for '{field_name}', got bool")
-    if isinstance(value, (int, float)):
+        _die(f"Invalid float field (bool not allowed): {field_name}")
+    try:
         return float(value)
-    if isinstance(value, str):
-        try:
-            return float(value)
-        except Exception as e:
-            raise ValueError(f"Failed to parse float for '{field_name}': {value}") from e
-    raise ValueError(f"Expected float for '{field_name}', got {type(value).__name__}")
+    except Exception:
+        _die(f"Invalid float value for {field_name}: {value}")
 
 
-def load_yaml(path: str) -> Dict[str, Any]:
-    """Load YAML from a file path. Use '-' to read from stdin."""
-    if path == "-":
-        data = sys.stdin.read()
-        return yaml.safe_load(data) or {}
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+def _read_text_file(path: Path) -> str:
+    """Read UTF-8 text content from a file."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        _die(f"File not found: {path}")
+    except Exception as e:
+        _die(f"Failed to read file: {path} ({e})")
 
 
-def find_graph_question(cfg: Dict[str, Any], node_id: str) -> Optional[str]:
-    """Find question text from graph.nodes by id."""
-    graph = cfg.get("graph") or {}
-    nodes = graph.get("nodes") or []
-    for n in nodes:
-        if (n or {}).get("id") == node_id:
-            q = (n or {}).get("question")
-            if q is None:
-                return None
-            return str(q)
-    return None
+def _load_yaml_from_text(raw: str, origin: str) -> Dict[str, Any]:
+    """Parse YAML from raw text into a dict."""
+    try:
+        data = yaml.safe_load(raw)
+    except Exception as e:
+        _die(f"Invalid YAML: {origin} ({e})")
+    if not isinstance(data, dict):
+        _die(f"Top-level YAML must be a mapping/object: {origin}")
+    return data
 
 
-def find_node_prompt_template(cfg: Dict[str, Any], node_id: str) -> Optional[str]:
-    """Find prompt template from prompts list by nodeId."""
-    plist = cfg.get("prompts") or []
-    for p in plist:
-        if (p or {}).get("nodeId") == node_id:
-            tmpl = (p or {}).get("prompt")
-            if tmpl is None:
-                return None
-            return str(tmpl)
-    return None
-
-
-def extract_prompt_parts(cfg: Dict[str, Any]) -> PromptParts:
-    """Extract prompt-related fields from slm config."""
-    slm = cfg.get("slm") or {}
-
-    return PromptParts(
-        user_prefix=_as_str(slm.get("user_turn_prefix", "<start_of_turn>user"), "slm.user_turn_prefix").strip(),
-        model_prefix=_as_str(slm.get("model_turn_prefix", "<start_of_turn>model"), "slm.model_turn_prefix").strip(),
-        turn_end=_as_str(slm.get("turn_end", "<end_of_turn>"), "slm.turn_end").strip(),
-        preamble=_as_str(slm.get("preamble", ""), "slm.preamble").strip(),
-        key_contract=_as_str(slm.get("key_contract", ""), "slm.key_contract").rstrip(),
-        length_budget=_as_str(slm.get("length_budget", ""), "slm.length_budget").rstrip(),
-        scoring_rule=_as_str(slm.get("scoring_rule", ""), "slm.scoring_rule").strip(),
-        strict_output=_as_str(slm.get("strict_output", ""), "slm.strict_output").rstrip(),
-        empty_json_instruction=_as_str(
-            slm.get("empty_json_instruction", "Respond with an empty JSON object: {}"),
-            "slm.empty_json_instruction",
-        ).strip(),
-    )
-
-
-def extract_slm_settings_kv(cfg: Dict[str, Any], include_turn_markers: bool) -> List[str]:
+def _load_yaml_config(path_or_dash: str) -> Dict[str, Any]:
     """
-    Extract display-friendly SLM settings as key=value lines.
-    NOTE: Not JSON. Designed for UI/debug copy-paste.
+    Load YAML config into a dict.
+
+    Rules:
+    - If path is '-', read YAML from stdin.
+    - Otherwise, read from the given file path.
     """
-    slm = cfg.get("slm") or {}
-    parts = extract_prompt_parts(cfg)
-
-    accelerator = slm.get("accelerator")
-    max_tokens = _as_int(slm.get("max_tokens"), "slm.max_tokens")
-    top_k = _as_int(slm.get("top_k"), "slm.top_k")
-    top_p = _as_float(slm.get("top_p"), "slm.top_p")
-    temperature = _as_float(slm.get("temperature"), "slm.temperature")
-
-    lines: List[str] = []
-    lines.append("slm.accelerator=" + (str(accelerator) if accelerator is not None else ""))
-    lines.append("slm.max_tokens=" + (str(max_tokens) if max_tokens is not None else ""))
-    lines.append("slm.top_k=" + (str(top_k) if top_k is not None else ""))
-    lines.append("slm.top_p=" + (str(top_p) if top_p is not None else ""))
-    lines.append("slm.temperature=" + (str(temperature) if temperature is not None else ""))
-
-    if include_turn_markers:
-        lines.append("slm.user_turn_prefix=" + parts.user_prefix)
-        lines.append("slm.model_turn_prefix=" + parts.model_prefix)
-        lines.append("slm.turn_end=" + parts.turn_end)
-
-    return lines
+    if path_or_dash.strip() == "-":
+        raw = sys.stdin.read()
+        if not raw.strip():
+            _die("No YAML content provided on stdin ('-')")
+        return _load_yaml_from_text(raw, origin="stdin")
+    p = Path(path_or_dash)
+    raw = _read_text_file(p)
+    return _load_yaml_from_text(raw, origin=str(p))
 
 
-def render_template(tmpl: str, question: str, answer: str) -> str:
-    """Replace placeholders with question/answer."""
-    out = tmpl.replace("{{QUESTION}}", question)
-    out = out.replace("{{ANSWER}}", answer)
+# =============================================================================
+# Graph helpers
+# =============================================================================
+
+def _get_nodes(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return graph nodes list."""
+    graph = cfg.get("graph")
+    if not isinstance(graph, dict):
+        _die("Missing or invalid 'graph' section")
+    nodes = graph.get("nodes")
+    if not isinstance(nodes, list):
+        _die("Missing or invalid 'graph.nodes' (must be a list)")
+    out: List[Dict[str, Any]] = []
+    for i, n in enumerate(nodes):
+        if not isinstance(n, dict):
+            _die(f"Invalid node at graph.nodes[{i}] (must be an object)")
+        out.append(n)
     return out
 
 
-def compose_final_prompt(
-    cfg: Dict[str, Any],
-    node_id: str,
-    question: str,
-    answer: str,
-    force_empty_json: bool = False,
-) -> str:
-    """Compose a final model prompt for a given nodeId."""
-    parts = extract_prompt_parts(cfg)
+def _find_node(cfg: Dict[str, Any], node_id: str) -> Dict[str, Any]:
+    """Find a node by id."""
+    for n in _get_nodes(cfg):
+        if _as_str(n.get("id"), "graph.nodes[].id", default="") == node_id:
+            return n
+    _die(f"Node id not found in graph.nodes: {node_id}")
 
-    node_tmpl = find_node_prompt_template(cfg, node_id)
-    if not node_tmpl:
-        node_tmpl = "Question: {{QUESTION}}\nAnswer: {{ANSWER}}"
 
-    node_block = render_template(node_tmpl, question=question, answer=answer).rstrip()
+def _list_node_summaries(cfg: Dict[str, Any]) -> List[Tuple[str, str, str]]:
+    """Return (id, type, title) for all nodes."""
+    out: List[Tuple[str, str, str]] = []
+    for n in _get_nodes(cfg):
+        nid = _as_str(n.get("id"), "graph.nodes[].id", default="")
+        ntype = _as_str(n.get("type"), f"graph.nodes[{nid}].type", default="")
+        title = _as_str(n.get("title"), f"graph.nodes[{nid}].title", default="")
+        out.append((nid, ntype, title))
+    return out
 
-    blocks: List[str] = []
 
-    if parts.preamble:
-        blocks.append(parts.preamble)
-    if parts.key_contract:
-        blocks.append(parts.key_contract)
-    if parts.length_budget:
-        blocks.append(parts.length_budget)
-    if parts.scoring_rule:
-        blocks.append(parts.scoring_rule)
-    if parts.strict_output:
-        blocks.append(parts.strict_output)
+# =============================================================================
+# SLM prompt contract + settings dump
+# =============================================================================
 
-    if force_empty_json:
-        blocks.append(parts.empty_json_instruction)
+def _load_parts(cfg: Dict[str, Any]) -> PromptParts:
+    """Load SLM prompt parts from cfg['slm']."""
+    slm = cfg.get("slm")
+    if not isinstance(slm, dict):
+        _die("Missing or invalid 'slm' section")
+
+    user_prefix = _as_str(slm.get("user_turn_prefix"), "slm.user_turn_prefix", default="<start_of_turn>user")
+    model_prefix = _as_str(slm.get("model_turn_prefix"), "slm.model_turn_prefix", default="<start_of_turn>model")
+    turn_end = _as_str(slm.get("turn_end"), "slm.turn_end", default="<end_of_turn>")
+    preamble = _as_str(slm.get("preamble"), "slm.preamble", default="")
+    key_contract = _as_str(slm.get("key_contract"), "slm.key_contract", default="")
+    length_budget = _as_str(slm.get("length_budget"), "slm.length_budget", default="")
+    scoring_rule = _as_str(slm.get("scoring_rule"), "slm.scoring_rule", default="")
+    strict_output = _as_str(slm.get("strict_output"), "slm.strict_output", default="")
+    empty_json_instruction = _as_str(
+        slm.get("empty_json_instruction"),
+        "slm.empty_json_instruction",
+        default="Respond with an empty JSON object: {}",
+    )
+
+    return PromptParts(
+        user_prefix=user_prefix,
+        model_prefix=model_prefix,
+        turn_end=turn_end,
+        preamble=preamble.strip("\n"),
+        key_contract=key_contract.strip("\n"),
+        length_budget=length_budget.strip("\n"),
+        scoring_rule=scoring_rule.strip("\n"),
+        strict_output=strict_output.strip("\n"),
+        empty_json_instruction=empty_json_instruction.strip("\n"),
+    )
+
+
+def _collect_slm_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Collect SLM runtime-relevant settings from cfg['slm'] for display/debug."""
+    slm = cfg.get("slm")
+    if not isinstance(slm, dict):
+        _die("Missing or invalid 'slm' section")
+
+    settings: Dict[str, Any] = {
+        "accelerator": _as_str(slm.get("accelerator"), "slm.accelerator", default=""),
+        "max_tokens": _as_int(slm.get("max_tokens"), "slm.max_tokens", default=0),
+        "top_k": _as_int(slm.get("top_k"), "slm.top_k", default=0),
+        "top_p": _as_float(slm.get("top_p"), "slm.top_p", default=0.0),
+        "temperature": _as_float(slm.get("temperature"), "slm.temperature", default=0.0),
+        "user_turn_prefix": _as_str(slm.get("user_turn_prefix"), "slm.user_turn_prefix", default="<start_of_turn>user"),
+        "model_turn_prefix": _as_str(slm.get("model_turn_prefix"), "slm.model_turn_prefix", default="<start_of_turn>model"),
+        "turn_end": _as_str(slm.get("turn_end"), "slm.turn_end", default="<end_of_turn>"),
+        # Prompt contract fields (useful for debugging)
+        "preamble": _as_str(slm.get("preamble"), "slm.preamble", default=""),
+        "key_contract": _as_str(slm.get("key_contract"), "slm.key_contract", default=""),
+        "length_budget": _as_str(slm.get("length_budget"), "slm.length_budget", default=""),
+        "scoring_rule": _as_str(slm.get("scoring_rule"), "slm.scoring_rule", default=""),
+        "strict_output": _as_str(slm.get("strict_output"), "slm.strict_output", default=""),
+        "empty_json_instruction": _as_str(slm.get("empty_json_instruction"), "slm.empty_json_instruction", default="Respond with an empty JSON object: {}"),
+    }
+    return settings
+
+
+def _kv_safe(v: Any) -> str:
+    """
+    Format a value as a single-line string for key=value output.
+    - Strings become JSON-escaped (so newlines turn into \\n).
+    - Other types become JSON too when possible.
+    """
+    if isinstance(v, str):
+        return json.dumps(v, ensure_ascii=False)
+    try:
+        return json.dumps(v, ensure_ascii=False)
+    except Exception:
+        return str(v)
+
+
+def _format_slm_settings(settings: Dict[str, Any], fmt: str) -> str:
+    """Format settings for display (stderr by default)."""
+    fmt_norm = (fmt or "kv").lower().strip()
+    if fmt_norm == "json":
+        return json.dumps(settings, ensure_ascii=False, separators=(",", ":"))
+    if fmt_norm == "yaml":
+        return yaml.safe_dump({"slm": settings}, sort_keys=False, allow_unicode=True).rstrip("\n")
+
+    lines: List[str] = ["slm settings:"]
+    for k, v in settings.items():
+        lines.append(f"- {k}={_kv_safe(v)}")
+    return "\n".join(lines)
+
+
+# =============================================================================
+# Prompt templates
+# =============================================================================
+
+def _find_prompt_template(cfg: Dict[str, Any], node_id: str) -> Optional[str]:
+    """Find prompt template text for a given nodeId."""
+    prompts = cfg.get("prompts")
+    if prompts is None:
+        return None
+    if not isinstance(prompts, list):
+        _die("Invalid 'prompts' section (must be a list)")
+    for i, p in enumerate(prompts):
+        if not isinstance(p, dict):
+            _die(f"Invalid prompts[{i}] (must be an object)")
+        pid = _as_str(p.get("nodeId"), f"prompts[{i}].nodeId", default="")
+        if pid == node_id:
+            tmpl = p.get("prompt")
+            if tmpl is None:
+                return ""
+            return _as_str(tmpl, f"prompts[{i}].prompt", default="")
+    return None
+
+
+def _default_task_prompt(question: str, answer: str) -> str:
+    """Fallback prompt when a node-specific template is missing."""
+    return (
+        "Task:\n"
+        "- Note weaknesses (e.g., unclear units, missing baseline/time window).\n"
+        "- Provide ONE strong expected answer that fits the question.\n"
+        "- Ask exactly 1 follow-up question to CONFIRM/VALIDATE the same answer (single short sentence).\n"
+        "- Score 1–100 (integer).\n\n"
+        f"Question: {question}\n"
+        f"Answer: {answer}\n"
+    )
+
+
+def _apply_placeholders(template: str, question: str, answer: str) -> str:
+    """Replace {{QUESTION}} and {{ANSWER}} placeholders."""
+    out = template.replace("{{QUESTION}}", question).replace("{{ANSWER}}", answer)
+    out = out.replace("{{ QUESTION }}", question).replace("{{ ANSWER }}", answer)
+    return out
+
+
+def compose_prompt(cfg: Dict[str, Any], node_id: str, answer: str, question_override: Optional[str] = None) -> str:
+    """Compose the final prompt for a given node + answer."""
+    parts = _load_parts(cfg)
+    node = _find_node(cfg, node_id)
+
+    node_type = _as_str(node.get("type"), f"graph.nodes[{node_id}].type", default="")
+    node_question = _as_str(node.get("question"), f"graph.nodes[{node_id}].question", default="")
+    question = question_override if (question_override is not None and question_override != "") else node_question
+
+    # For non-AI nodes, return an "empty JSON" instruction prompt (or skip calling the model upstream).
+    if node_type.upper() != "AI":
+        body = parts.empty_json_instruction
+        sections = [
+            parts.user_prefix,
+            parts.preamble,
+            parts.key_contract,
+            parts.length_budget,
+            parts.scoring_rule,
+            parts.strict_output,
+            body,
+            parts.turn_end,
+            parts.model_prefix,
+        ]
+        return "\n".join([s for s in sections if s.strip() != ""]).strip() + "\n"
+
+    tmpl = _find_prompt_template(cfg, node_id)
+    if tmpl is None or tmpl.strip() == "":
+        body = _default_task_prompt(question=question, answer=answer)
     else:
-        blocks.append(node_block)
+        body = _apply_placeholders(tmpl, question=question, answer=answer)
 
-    full_user_content = "\n\n".join(blocks).rstrip()
+    sections = [
+        parts.user_prefix,
+        parts.preamble,
+        parts.key_contract,
+        parts.length_budget,
+        parts.scoring_rule,
+        parts.strict_output,
+        body.strip("\n"),
+        parts.turn_end,
+        parts.model_prefix,
+    ]
+    return "\n".join([s for s in sections if s.strip() != ""]).strip() + "\n"
 
-    final_prompt = (
-        f"{parts.user_prefix}\n"
-        f"{full_user_content}\n"
-        f"{parts.turn_end}\n"
-        f"{parts.model_prefix}\n"
+
+# =============================================================================
+# CLI
+# =============================================================================
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """Build CLI args."""
+    p = argparse.ArgumentParser(
+        prog="compose_prompt.py",
+        description="Compose an SLM prompt from survey_config.yaml for a given node and answer.",
     )
-    return final_prompt
+    p.add_argument("config", help="Path to survey_config.yaml (use '-' to read from stdin)")
+    p.add_argument("--node", required=True, help="Node id (e.g., Q1, Q2, ...)")
+    p.add_argument("--answer", required=True, help="Answer text to evaluate")
+    p.add_argument("--question", default=None, help="Optional override question text (otherwise uses graph.nodes[].question)")
+    p.add_argument("--list-nodes", action="store_true", help="List node ids/types/titles and exit")
+
+    # SLM settings display/debug
+    p.add_argument("--slm-format", choices=["kv", "yaml", "json"], default="kv", help="Format for SLM settings output")
+    p.add_argument("--dump-slm", action="store_true", help="Print SLM settings to stdout and exit (no prompt)")
+
+    # Default ON: show settings to stderr
+    p.add_argument("--show-slm", dest="show_slm", action="store_true", help="Show SLM settings to stderr (default)")
+    p.add_argument("--no-show-slm", dest="show_slm", action="store_false", help="Do NOT show SLM settings")
+    p.set_defaults(show_slm=True)
+
+    return p
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Compose final prompt from survey YAML config (optionally show SLM settings).")
-    parser.add_argument("config", help="Path to YAML config (use '-' for stdin).")
-    parser.add_argument("--node", required=True, help="Node id, e.g., Q1")
-    parser.add_argument("--question", default=None, help="Override question text. If omitted, tries graph lookup.")
-    parser.add_argument("--answer", default="", help="Answer text (can be empty).")
-    parser.add_argument("--empty", action="store_true", help="Force empty JSON instruction instead of node prompt.")
+def main(argv: Optional[List[str]] = None) -> int:
+    """CLI entrypoint."""
+    args = _build_arg_parser().parse_args(argv)
+    cfg = _load_yaml_config(str(args.config))
 
-    parser.add_argument("--show-slm", action="store_true", help="Print SLM settings before the final prompt (not JSON).")
-    parser.add_argument("--include-turn-markers", action="store_true", help="Include turn marker strings in SLM settings output.")
-    parser.add_argument("--separator", default="-----", help="Separator line between SLM settings and the prompt.")
+    if args.list_nodes:
+        rows = _list_node_summaries(cfg)
+        for nid, ntype, title in rows:
+            print(f"{nid}\t{ntype}\t{title}")
+        return 0
 
-    args = parser.parse_args()
+    slm_settings = _collect_slm_settings(cfg)
 
-    cfg = load_yaml(args.config)
+    if args.dump_slm:
+        sys.stdout.write(_format_slm_settings(slm_settings, args.slm_format) + "\n")
+        return 0
 
-    question = args.question
-    if question is None:
-        question = find_graph_question(cfg, args.node)
-        if question is None:
-            raise SystemExit(
-                f"Question not provided and not found in graph for node '{args.node}'. "
-                "Use --question to override."
-            )
-
-    prompt = compose_final_prompt(
-        cfg=cfg,
-        node_id=args.node,
-        question=question,
-        answer=args.answer,
-        force_empty_json=args.empty,
-    )
-
+    # Show settings on stderr to keep stdout clean for piping.
     if args.show_slm:
-        kv_lines = extract_slm_settings_kv(cfg, include_turn_markers=args.include_turn_markers)
-        sys.stdout.write("\n".join(kv_lines).rstrip() + "\n")
-        sys.stdout.write(args.separator + "\n")
+        sys.stderr.write(_format_slm_settings(slm_settings, args.slm_format) + "\n")
 
+    prompt = compose_prompt(
+        cfg=cfg,
+        node_id=str(args.node),
+        answer=str(args.answer),
+        question_override=(None if args.question is None else str(args.question)),
+    )
     sys.stdout.write(prompt)
     return 0
 
