@@ -64,7 +64,7 @@ slm:
   accelerator: "GPU"
 
   # Reliability-tuned generation defaults (recommended)
-  max_tokens: 256
+  max_tokens: 1024
   top_k: 20
   top_p: 0.9
   temperature: 0.2
